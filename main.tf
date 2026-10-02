@@ -1,53 +1,36 @@
-resource "aws_vpc" "main" {
-  cidr_block = "10.0.0.0/16"
-
-  tags = {
-    Name = "terraform-main-vpc"
-  }
+moved {
+  from = aws_vpc.main
+  to   = module.vpc.aws_vpc.main
 }
 
-resource "aws_subnet" "public" {
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = "10.0.1.0/24"
-  availability_zone = "eu-north-1a"
-
-  tags = {
-    Name = "terraform-public-subnet"
-  }
+moved {
+  from = aws_subnet.public
+  to   = module.vpc.aws_subnet.public
 }
 
-resource "aws_internet_gateway" "main" {
-  vpc_id = aws_vpc.main.id
-
-  tags = {
-    Name = "terraform-main-igw"
-  }
+moved {
+  from = aws_internet_gateway.main
+  to   = module.vpc.aws_internet_gateway.main
 }
 
-
-resource "aws_route_table" "public" {
-  vpc_id = aws_vpc.main.id
-
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.main.id
-  }
-
-  tags = {
-    Name = "terraform-public-route-table"
-  }
+moved {
+  from = aws_route_table.public
+  to   = module.vpc.aws_route_table.public
 }
 
+moved {
+  from = aws_route_table_association.public
+  to   = module.vpc.aws_route_table_association.public
+}
 
-resource "aws_route_table_association" "public" {
-  subnet_id      = aws_subnet.public.id
-  route_table_id = aws_route_table.public.id
+module "vpc" {
+  source = "./modules/vpc"
 }
 
 resource "aws_security_group" "ec2" {
   name        = "terraform-ec2-sg"
   description = "Security group for Terraform EC2 instance"
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = module.vpc.vpc_id
 
   ingress {
     description = "SSH"
@@ -77,7 +60,6 @@ resource "aws_security_group" "ec2" {
   }
 }
 
-
 data "aws_ami" "ubuntu" {
   most_recent = true
 
@@ -98,7 +80,7 @@ resource "aws_instance" "web" {
   ami           = data.aws_ami.ubuntu.id
   instance_type = var.instance_type
 
-  subnet_id              = aws_subnet.public.id
+  subnet_id              = module.vpc.subnet_id
   vpc_security_group_ids = [aws_security_group.ec2.id]
 
   iam_instance_profile = aws_iam_instance_profile.ec2_profile.name
@@ -115,10 +97,6 @@ resource "aws_s3_bucket" "terraform_state" {
     Name = "terraform-state-bucket"
   }
 }
-
-
-
-
 
 resource "aws_s3_bucket_versioning" "terraform_state" {
   bucket = aws_s3_bucket.terraform_state.id
@@ -146,7 +124,6 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "terraform_state" 
     }
   }
 }
-
 
 resource "aws_iam_role" "ec2_role" {
   name = "terraform-ec2-role"
