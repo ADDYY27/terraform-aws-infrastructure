@@ -10,7 +10,7 @@ output "subnet_id" {
 
 output "instance_id" {
   description = "ID of the web EC2 instance"
-  value       = aws_instance.web.id
+  value       = module.ec2.instance_id
 }
 
 output "iam_role_name" {

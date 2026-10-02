@@ -27,6 +27,14 @@ module "vpc" {
   source = "./modules/vpc"
 }
 
+
+moved {
+  from = aws_instance.web
+  to   = module.ec2.aws_instance.web
+}
+
+
+
 resource "aws_security_group" "ec2" {
   name        = "terraform-ec2-sg"
   description = "Security group for Terraform EC2 instance"
@@ -76,18 +84,14 @@ data "aws_ami" "ubuntu" {
   }
 }
 
-resource "aws_instance" "web" {
-  ami           = data.aws_ami.ubuntu.id
-  instance_type = var.instance_type
+module "ec2" {
+  source = "./modules/ec2"
 
-  subnet_id              = module.vpc.subnet_id
-  vpc_security_group_ids = [aws_security_group.ec2.id]
-
+  ami_id               = data.aws_ami.ubuntu.id
+  instance_type        = var.instance_type
+  subnet_id            = module.vpc.subnet_id
+  security_group_id    = aws_security_group.ec2.id
   iam_instance_profile = aws_iam_instance_profile.ec2_profile.name
-
-  tags = {
-    Name = "terraform-web-server"
-  }
 }
 
 resource "aws_s3_bucket" "terraform_state" {
