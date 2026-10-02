@@ -33,6 +33,25 @@ moved {
   to   = module.ec2.aws_instance.web
 }
 
+moved {
+  from = aws_iam_role.ec2_role
+  to   = module.iam.aws_iam_role.ec2_role
+}
+
+moved {
+  from = aws_iam_role_policy.ec2_s3_read
+  to   = module.iam.aws_iam_role_policy.ec2_s3_read
+}
+
+moved {
+  from = aws_iam_instance_profile.ec2_profile
+  to   = module.iam.aws_iam_instance_profile.ec2_profile
+}
+
+
+
+
+
 
 
 resource "aws_security_group" "ec2" {
@@ -91,7 +110,7 @@ module "ec2" {
   instance_type        = var.instance_type
   subnet_id            = module.vpc.subnet_id
   security_group_id    = aws_security_group.ec2.id
-  iam_instance_profile = aws_iam_instance_profile.ec2_profile.name
+  iam_instance_profile = module.iam.instance_profile_name
 }
 
 resource "aws_s3_bucket" "terraform_state" {
@@ -129,57 +148,11 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "terraform_state" 
   }
 }
 
-resource "aws_iam_role" "ec2_role" {
-  name = "terraform-ec2-role"
 
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-
-    Statement = [
-      {
-        Effect = "Allow"
-
-        Principal = {
-          Service = "ec2.amazonaws.com"
-        }
-
-        Action = "sts:AssumeRole"
-      }
-    ]
-  })
-
-  tags = {
-    Name = "terraform-ec2-role"
-  }
+module "iam" {
+  source = "./modules/iam"
 }
 
-resource "aws_iam_role_policy" "ec2_s3_read" {
-  name = "terraform-ec2-s3-read"
-  role = aws_iam_role.ec2_role.id
 
-  policy = jsonencode({
-    Version = "2012-10-17"
 
-    Statement = [
-      {
-        Effect = "Allow"
 
-        Action = [
-          "s3:GetObject",
-          "s3:ListBucket"
-        ]
-
-        Resource = "*"
-      }
-    ]
-  })
-}
-
-resource "aws_iam_instance_profile" "ec2_profile" {
-  name = "terraform-ec2-profile"
-  role = aws_iam_role.ec2_role.name
-
-  tags = {
-    Name = "terraform-ec2-profile"
-  }
-}

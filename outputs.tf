@@ -15,7 +15,7 @@ output "instance_id" {
 
 output "iam_role_name" {
   description = "Name of the EC2 IAM role"
-  value       = aws_iam_role.ec2_role.name
+  value       = module.iam.role_name
 }
 
 output "terraform_state_bucket" {
