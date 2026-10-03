@@ -28,6 +28,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
 
       - name: Configure AWS Credentials
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: arn:aws:iam::905641673315:role/GitHubActionsTerraformRole
@@ -35,16 +36,23 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Verify AWS Identity
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: aws sts get-caller-identity
 
       - name: Terraform Format Check
         run: terraform fmt -check -recursive
 
-      - name: Terraform Init
+      - name: Terraform Init - Pull Request
+        if: github.event_name == 'pull_request'
+        run: terraform init -backend=false
+
+      - name: Terraform Init - Main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: terraform init
 
       - name: Terraform Validate
         run: terraform validate
 
       - name: Terraform Plan
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: terraform plan
