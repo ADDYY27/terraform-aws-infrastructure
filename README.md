@@ -1,6 +1,10 @@
 # Terraform AWS Infrastructure
 
-A hands-on Infrastructure as Code project where I provisioned and managed real AWS infrastructure using Terraform. The project includes networking, compute, IAM, remote state management, and a CI pipeline with GitHub Actions using OIDC-based authentication — no static AWS credentials stored anywhere.
+A hands-on DevOps / Infrastructure as Code project where I provision and manage real AWS infrastructure with Terraform — instead of clicking around in the AWS Console.
+
+It started as a basic root-level setup and slowly grew into a modular configuration with remote state, IAM roles, and a GitHub Actions CI pipeline that authenticates to AWS through OIDC. No long-lived access keys stored anywhere.
+
+> **Repository:** [terraform-aws-infrastructure](https://github.com/ADDYY27/terraform-aws-infrastructure) &nbsp;|&nbsp; **Region:** `eu-north-1` (Stockholm) &nbsp;|&nbsp; **Provider:** AWS `~> 6.0` (locked at `6.67.0`)
 
 ---
 
@@ -12,14 +16,6 @@ A hands-on Infrastructure as Code project where I provisioned and managed real A
 - [Architecture](#architecture)
 - [Project Structure](#project-structure)
 - [AWS Infrastructure](#aws-infrastructure)
-  - [VPC](#vpc)
-  - [Public Subnet](#public-subnet)
-  - [Internet Gateway](#internet-gateway)
-  - [Route Table](#route-table)
-  - [Security Group](#security-group)
-  - [EC2 Instance](#ec2-instance)
-  - [IAM Role and Instance Profile](#iam-role-and-instance-profile)
-  - [S3 Remote State](#s3-remote-state)
 - [Terraform Modules](#terraform-modules)
 - [Remote State](#remote-state)
 - [GitHub Actions CI](#github-actions-ci)
@@ -28,14 +24,18 @@ A hands-on Infrastructure as Code project where I provisioned and managed real A
 - [Problems I Faced](#problems-i-faced)
 - [Getting Started](#getting-started)
 - [What I Learned](#what-i-learned)
+- [Cleanup](#cleanup)
+- [Future Improvements](#future-improvements)
 
 ---
 
 ## Overview
 
-I built this project to get practical experience with Terraform and AWS. Instead of clicking through the AWS console, I wanted to define all my infrastructure in code so it could be version-controlled, reviewed, and reproduced consistently.
+I built this project to actually learn how Terraform works in practice — not just writing `.tf` files, but dealing with state, modules, IAM permissions, and CI. The idea was simple: stop creating AWS resources manually in the console and manage everything as code.
 
-The setup covers a realistic (though simple) production-like pattern: isolated networking with a VPC, a compute layer with an EC2 instance, an IAM role attached to the instance, remote Terraform state stored securely in S3, and a CI pipeline that runs `terraform plan` on every push using short-lived OIDC credentials instead of hardcoded AWS keys.
+The project began with a plain root-level configuration. Over time I refactored it into modules, moved the state to an S3 remote backend, added IAM roles, and wired up GitHub Actions so every push to `main` gets validated and planned automatically.
+
+Along the way I hit real IAM and OIDC issues, which honestly taught me more than the parts that worked on the first try.
 
 ---
 
@@ -44,13 +44,13 @@ The setup covers a realistic (though simple) production-like pattern: isolated n
 | Area | What I Implemented |
 |---|---|
 | Networking | VPC, Public Subnet, Internet Gateway, Route Table, Route Table Association |
-| Compute | Ubuntu 24.04 EC2 instance (`t3.micro`) |
-| Security | Security Group with SSH and HTTP ingress rules |
-| Identity | IAM Role, Inline Policy, Instance Profile |
-| State Management | S3 Remote Backend with versioning, encryption, and public access blocking |
+| Compute | Ubuntu 24.04 EC2 instance (`t3.micro`, configurable via variable) |
+| Security | Security Group with SSH (22) and HTTP (80) ingress rules |
+| Identity | IAM Role, Inline S3 Read Policy, Instance Profile |
+| State Management | S3 Remote Backend with versioning, AES256 encryption, public access blocking |
 | Modules | Separate `vpc`, `ec2`, and `iam` Terraform modules |
-| CI/CD | GitHub Actions workflow — format check, init, validate, plan |
-| Authentication | GitHub OIDC — no static AWS access keys |
+| CI/CD | GitHub Actions — `fmt`, `init`, `validate`, `plan` on every push to `main` |
+| Authentication | GitHub OIDC — no static AWS access keys stored anywhere |
 
 ---
 
@@ -61,9 +61,9 @@ The setup covers a realistic (though simple) production-like pattern: isolated n
 | Terraform | >= 1.6.0 |
 | AWS Provider | ~> 6.0 (locked at 6.67.0) |
 | AWS Region | `eu-north-1` (Stockholm) |
-| EC2 AMI | Ubuntu 24.04 LTS (`ubuntu-noble-24.04-amd64-server-*`) |
-| Instance Type | `t3.micro` |
-| Remote State | AWS S3 with native lockfile (`use_lockfile = true`) |
+| EC2 AMI | Ubuntu 24.04 LTS — looked up dynamically, not hardcoded |
+| Instance Type | `t3.micro` (overridable via `instance_type` variable) |
+| Remote State | AWS S3, `use_lockfile = true` (no DynamoDB needed) |
 | CI | GitHub Actions |
 | Auth | AWS IAM OIDC Identity Provider |
 
@@ -71,15 +71,20 @@ The setup covers a realistic (though simple) production-like pattern: isolated n
 
 ## Architecture
 
+### Overall Flow
+
+The general idea: push code → GitHub Actions picks it up → authenticates to AWS through OIDC → Terraform reads remote state from S3 and plans the infrastructure. Nothing is applied automatically.
+
 ```mermaid
 flowchart TD
-    A(["🖥️ GitHub Repository\nmain branch"]) -->|git push| B
+    A(["💻 GitHub Repository\nmain branch"]) -->|git push| B
 
     B(["⚙️ GitHub Actions Runner"]) -->|"OIDC Token\n(short-lived, no static keys)"| C
 
     C(["🔐 AWS IAM OIDC Provider\ntoken.actions.githubusercontent.com"]) -->|AssumeRoleWithWebIdentity| D
 
-    D(["👤 GitHubActionsTerraformRole"]) --> E
+    D(["👤 GitHubActionsTerraformRole"])
+    D --> E
     D --> F
 
     E(["🗄️ S3 Remote State\nterraform-aws-infrastructure-state-2026"])
@@ -105,34 +110,41 @@ flowchart TD
 
 ```
 terraform-aws-infrastructure/
-|
-+-- .github/
-|   +-- workflows/
-|       +-- terraform.yml        # GitHub Actions CI pipeline
-|
-+-- modules/
-|   +-- ec2/
-|   |   +-- main.tf              # EC2 instance resource
-|   |   +-- variables.tf         # Input variables (ami_id, instance_type, etc.)
-|   |   +-- outputs.tf           # Outputs (instance_id)
-|   |
-|   +-- iam/
-|   |   +-- main.tf              # IAM role, inline policy, instance profile
-|   |   +-- variables.tf
-|   |   +-- outputs.tf           # Outputs (role_name, instance_profile_name)
-|   |
-|   +-- vpc/
-|       +-- main.tf              # VPC, subnet, IGW, route table
-|       +-- variables.tf
-|       +-- outputs.tf           # Outputs (vpc_id, subnet_id)
-|
-+-- main.tf                      # Root module: calls vpc, ec2, iam + S3 + SG
-+-- providers.tf                 # AWS provider config and S3 backend
-+-- variables.tf                 # Root input variables (instance_type)
-+-- outputs.tf                   # Root outputs (vpc_id, instance_id, etc.)
-+-- .terraform.lock.hcl          # Provider version lock file
-+-- .gitignore                   # Ignores .terraform/, *.tfstate, *.tfvars
+│
+├── main.tf                  # Root config: module calls, security group, AMI data source, S3 bucket, moved blocks
+├── providers.tf             # Terraform + AWS provider versions, S3 backend config
+├── variables.tf             # Root variables (instance_type)
+├── outputs.tf               # Root outputs (vpc_id, subnet_id, instance_id, ...)
+├── .gitignore               # Ignores .terraform/, *.tfstate, *.tfvars
+├── .terraform.lock.hcl      # Provider dependency lock file
+│
+├── modules/
+│   ├── vpc/
+│   │   ├── main.tf          # VPC, subnet, IGW, route table, association
+│   │   ├── variables.tf
+│   │   └── outputs.tf       # vpc_id, subnet_id
+│   │
+│   ├── ec2/
+│   │   ├── main.tf          # EC2 instance
+│   │   ├── variables.tf     # ami_id, instance_type, subnet_id, security_group_id, iam_instance_profile
+│   │   └── outputs.tf       # instance_id
+│   │
+│   └── iam/
+│       ├── main.tf          # IAM role, S3 read policy, instance profile
+│       ├── variables.tf
+│       └── outputs.tf       # role_name, instance_profile_name
+│
+├── .github/
+│   └── workflows/
+│       └── terraform.yml    # CI pipeline
+│
+├── docs/
+│   └── archive/             # Archived earlier README drafts (v1, v2)
+│
+└── README.md
 ```
+
+> `.terraform/` is created locally after `terraform init` but is git-ignored. State files are also ignored — state lives in the S3 backend, not in the repo.
 
 ---
 
@@ -140,36 +152,44 @@ terraform-aws-infrastructure/
 
 ### VPC
 
-I created a VPC with the CIDR block `10.0.0.0/16`. This gives me an isolated network in AWS where I can control what traffic comes in and out. Without a VPC, everything would just land in the default AWS network, which is not a good practice.
+A single VPC with CIDR `10.0.0.0/16`. Everything else lives inside it. Without a custom VPC, resources would land in the default AWS network, which is not great for isolation or control.
 
 ### Public Subnet
 
-Inside the VPC, I created a public subnet at `10.0.1.0/24` in `eu-north-1a`. I put the EC2 instance here since it needs to be reachable from the internet.
+One public subnet (`10.0.1.0/24`) in the `eu-north-1a` availability zone. The EC2 instance goes here because it needs to be internet-accessible.
 
 ### Internet Gateway
 
-To actually connect the VPC to the internet, I attached an Internet Gateway. Without this, the VPC is completely isolated and nothing can reach the EC2 instance even if the subnet is set up correctly.
+Attached to the VPC. Without this, the VPC is fully isolated — nothing can reach the EC2 instance even if the subnet is configured correctly.
 
 ### Route Table
 
-I created a route table with a route that sends all outbound traffic (`0.0.0.0/0`) to the Internet Gateway. Then I associated it with the public subnet. This is what makes the subnet "public" — traffic from it can actually reach the internet through the IGW.
+Contains one route that sends all outbound traffic (`0.0.0.0/0`) to the Internet Gateway. The route table is then associated with the public subnet. This is what actually makes a subnet "public."
+
+| Destination | Target |
+|---|---|
+| `0.0.0.0/0` | Internet Gateway |
 
 ### Security Group
 
-I created a security group for the EC2 instance that allows:
+`terraform-ec2-sg`, attached to the EC2 instance:
 
-- **Port 22 (SSH)** — for remote access
-- **Port 80 (HTTP)** — for web traffic
-- **All outbound traffic** — so the instance can reach the internet for updates, etc.
+| Direction | Protocol | Port | Source / Destination |
+|---|---|---|---|
+| Inbound | TCP | 22 (SSH) | `0.0.0.0/0` |
+| Inbound | TCP | 80 (HTTP) | `0.0.0.0/0` |
+| Outbound | All | All | `0.0.0.0/0` |
+
+> **Note:** SSH is open to the entire internet because this is a learning project. In anything production-like, SSH should be restricted to a specific IP or CIDR. This is on the improvements list.
 
 ### EC2 Instance
 
-I launched a `t3.micro` Ubuntu 24.04 LTS instance. The AMI is looked up dynamically using a `data` source so it always picks the latest Ubuntu image — I don't have to hardcode the AMI ID.
+A `t3.micro` Ubuntu 24.04 LTS instance in the public subnet. The AMI is not hardcoded — a `data` source looks up the latest official Canonical Ubuntu Noble image at plan time:
 
 ```hcl
 data "aws_ami" "ubuntu" {
   most_recent = true
-  owners      = ["099720109477"]  # Canonical (Ubuntu publisher)
+  owners      = ["099720109477"]  # Canonical
 
   filter {
     name   = "name"
@@ -178,35 +198,50 @@ data "aws_ami" "ubuntu" {
 }
 ```
 
-The instance is placed in the public subnet, attached to the security group, and uses the IAM instance profile.
+The instance gets the security group from the root config and the instance profile from the IAM module.
 
 ### IAM Role and Instance Profile
 
-I created an IAM role called `terraform-ec2-role` that the EC2 instance can assume. The role has an inline policy that allows the instance to read objects from S3.
-
-To attach a role to an EC2 instance, AWS requires an **Instance Profile** — it's basically a container for the role. So I created `terraform-ec2-profile` and linked the role to it.
-
-### S3 Remote State
-
-I created an S3 bucket (`terraform-aws-infrastructure-state-2026`) to store Terraform's remote state. See the [Remote State](#remote-state) section for full details.
+- **Role** (`terraform-ec2-role`) — can be assumed by the EC2 service (`ec2.amazonaws.com`)
+- **Policy** — grants `s3:GetObject` and `s3:ListBucket` as an example of attaching permissions to an EC2 instance
+- **Instance Profile** (`terraform-ec2-profile`) — the required wrapper that lets EC2 use an IAM role. AWS won't let you attach a role directly to an instance, only via a profile.
 
 ---
 
 ## Terraform Modules
 
-Originally I wrote everything in a single `main.tf` file. Once things got bigger, I refactored the code into three separate modules so each area of infrastructure has its own folder and responsibility:
+Originally everything was in a single root `main.tf`. Once things grew, I refactored into three modules — each with its own folder, `main.tf`, `variables.tf`, and `outputs.tf`.
 
 | Module | What it manages |
 |---|---|
-| `modules/vpc` | VPC, Subnet, Internet Gateway, Route Table |
-| `modules/ec2` | EC2 instance |
+| `modules/vpc` | VPC, Subnet, Internet Gateway, Route Table, Association |
+| `modules/ec2` | EC2 Instance |
 | `modules/iam` | IAM Role, Inline Policy, Instance Profile |
 
-The root `main.tf` calls each module and passes inputs between them. For example, the EC2 module needs the subnet ID and security group ID, which come from the VPC module and the root module respectively.
+### Module Wiring
+
+The root `main.tf` calls each module and passes outputs between them. For example, the EC2 module needs a `subnet_id` from the VPC module and a `security_group_id` from the root module:
+
+```mermaid
+flowchart LR
+    ROOT["🗂️ Root main.tf"]
+
+    ROOT --> VPCM["📦 module.vpc"]
+    ROOT --> IAMM["📦 module.iam"]
+    ROOT --> SG["🛡️ aws_security_group.ec2"]
+
+    VPCM -->|"vpc_id\nsubnet_id"| ROOT
+    IAMM -->|instance_profile_name| ROOT
+    SG -->|security_group_id| EC2M
+
+    ROOT -->|"subnet_id\nprofile_name\nsg_id"| EC2M["📦 module.ec2"]
+```
 
 ### `moved` Blocks
 
-When I moved resources from the root module into the child modules, Terraform would have normally seen them as deleted and recreated — which would have destroyed my existing EC2 instance and VPC. To avoid that, I used Terraform `moved` blocks.
+When I refactored root resources into modules, Terraform would have treated the old addresses as deleted and the new module addresses as brand new — destroying my VPC and EC2 instance in the process.
+
+`moved` blocks prevent this:
 
 ```hcl
 moved {
@@ -215,65 +250,90 @@ moved {
 }
 ```
 
-These blocks tell Terraform: "this resource hasn't changed in AWS — it's just at a different address in the state file now." Terraform updates the state file without touching the actual cloud resources.
+This tells Terraform the resource is the same physical thing in AWS — just at a new address in the state file. Terraform updates state only, without touching real infrastructure.
 
-During `terraform plan`, this shows up as `"has moved to module..."` — that's completely expected and means no real infrastructure change happened.
+During `terraform plan` this appears as `"has moved to module..."` — that is expected and means nothing was destroyed.
 
 ---
 
 ## Remote State
 
-By default, Terraform stores state locally in a `terraform.tfstate` file. That works for solo experiments, but it has problems:
+By default Terraform stores state in a local `terraform.tfstate` file. That breaks down as soon as you add CI — GitHub Actions has no access to your laptop.
 
-- It can't be shared with a CI system like GitHub Actions
-- Easy to accidentally lose or corrupt
-- No history if something goes wrong
+I moved state to S3:
 
-So I configured S3 as the remote backend with the bucket `terraform-aws-infrastructure-state-2026`, the state key `terraform.tfstate`, encryption enabled, and S3-native locking via `use_lockfile = true` (available from Terraform 1.6+ — no DynamoDB table needed).
+| Config | Value |
+|---|---|
+| Bucket | `terraform-aws-infrastructure-state-2026` |
+| Key | `terraform.tfstate` |
+| Region | `eu-north-1` |
+| Encryption | `true` (AES256) |
+| Locking | `use_lockfile = true` — S3-native, no DynamoDB table needed |
 
-I also hardened the bucket itself with three additional configurations:
+The bucket itself is also hardened:
 
 | Feature | Why I added it |
 |---|---|
-| **Versioning** | Keeps a full history of every state file write, so I can roll back if something gets corrupted |
-| **Server-side encryption (AES256)** | The state file contains resource IDs and configuration details — it should always be encrypted at rest |
-| **Public access blocking** | The bucket is completely private; no chance of accidentally making it public |
+| **Versioning** | Every state write is versioned — bad state can be rolled back |
+| **AES256 Encryption** | State contains resource IDs and config details — should always be encrypted at rest |
+| **Public Access Blocking** | All four public access block settings are on — bucket is fully private |
+
+> **One caveat:** The S3 bucket is Terraform's own backend. Do not destroy it while it is still being used as the backend.
 
 ---
 
 ## GitHub Actions CI
 
-I set up a GitHub Actions workflow that runs automatically on every push to `main`.
+The workflow lives in `.github/workflows/terraform.yml` and runs automatically on pushes to `main`.
 
-### CI Pipeline Flow
+### Push to Main — Full Pipeline
 
 ```mermaid
 flowchart TD
-    A(["📤 git push to main"]) --> B
-
-    B(["🔐 Configure AWS Credentials\nvia GitHub OIDC"]) --> C
-
-    C(["✅ terraform fmt -check\nFails if any .tf file is badly formatted"]) --> D
-
-    D(["🔧 terraform init\nDownloads provider + connects to S3 backend"]) --> E
-
-    E(["🔍 terraform validate\nChecks HCL syntax is valid"]) --> F
-
-    F(["📋 terraform plan\nShows what would change — nothing is applied"])
+    Push(["📤 Push to main"]) --> Checkout(["📥 Checkout"])
+    Checkout --> Setup(["🔧 Setup Terraform"])
+    Setup --> Creds(["🔐 Configure AWS Credentials\nvia OIDC"])
+    Creds --> Who(["✅ Verify AWS Identity"])
+    Who --> Fmt(["📝 terraform fmt -check -recursive\nFails if any .tf file is badly formatted"])
+    Fmt --> Init(["⚙️ terraform init\nDownloads provider + connects to S3 backend"])
+    Init --> Val(["🔍 terraform validate\nChecks HCL syntax is valid"])
+    Val --> Plan(["📋 terraform plan\nShows what would change — nothing is applied"])
+    Plan --> Done(["🎉 Pipeline passes"])
 ```
 
-### Pull Request vs Push to Main
+### Pull Request — Lightweight Check
 
-The workflow behaves differently depending on how it's triggered:
+PRs intentionally do not get AWS credentials. They run a lighter validation only:
 
-- **Pull requests** — run `fmt`, `init -backend=false`, and `validate` only. No AWS credentials are issued to PRs. This is intentional: it reduces the attack surface and means PRs can be safely validated without needing AWS access.
-- **Push to main** — runs the full pipeline including AWS authentication and `terraform plan`.
+```mermaid
+flowchart TD
+    PR(["🔀 Pull Request"]) --> Checkout(["📥 Checkout"])
+    Checkout --> Setup(["🔧 Setup Terraform"])
+    Setup --> Fmt(["📝 terraform fmt -check"])
+    Fmt --> Init(["⚙️ terraform init -backend=false\nNo S3 connection needed"])
+    Init --> Val(["🔍 terraform validate"])
+    Val --> Done(["✅ Done — no AWS access needed"])
+```
+
+The point: PRs get syntax-checked, but never get access to the AWS account.
+
+### Final CI Result
+
+After all the troubleshooting described below, the pipeline completed successfully with:
+
+```
+Plan: 0 to add, 0 to change, 0 to destroy.
+```
+
+Zero changes is the right answer — it confirms the code and the real AWS infrastructure are in sync.
 
 ---
 
 ## AWS OIDC Authentication
 
-I didn't want to store long-lived AWS access keys in GitHub Secrets. If a key ever leaked, it would be valid indefinitely until someone manually rotated it. Instead, I used OpenID Connect (OIDC) — GitHub generates a short-lived signed token for each job, AWS verifies it, and the role is assumed temporarily. No keys to store, no keys to rotate.
+I did not want to store long-lived AWS access keys in GitHub Secrets. If a key leaked, it would be valid indefinitely until someone manually rotated it.
+
+Instead I used OpenID Connect (OIDC). GitHub generates a short-lived signed token for each job. AWS verifies it. The role is assumed temporarily. No keys to store, nothing to rotate, nothing to revoke.
 
 ### OIDC Authentication Flow
 
@@ -285,7 +345,7 @@ flowchart TD
 
     C(["🔐 AWS IAM OIDC Identity Provider\nVerifies token signature\nagainst GitHub public keys"]) --> D
 
-    D{"Does the token's sub claim\nmatch the trust policy?"}
+    D{"Does the token sub claim\nmatch the trust policy?"}
 
     D -->|Yes| E
     D -->|No| F
@@ -293,85 +353,108 @@ flowchart TD
     E(["✅ GitHubActionsTerraformRole\nassumed temporarily\nSession: max 1 hour"])
     F(["❌ Access Denied\nJob fails"])
 
-    E --> G(["🚀 terraform plan runs\nwith role permissions"])
+    E --> G(["🚀 terraform plan runs\nwith scoped read-only permissions"])
 ```
 
 ### What I Set Up
 
-To make this work, three things needed to be in place:
+Three things needed to be in place:
 
-1. **IAM OIDC Identity Provider** — registered `token.actions.githubusercontent.com` in AWS IAM so AWS knows to trust GitHub-signed tokens.
-2. **Trust Policy on the Role** — restricted to my specific repo and branch using the `sub` claim. Even if someone forks the repo, they can't assume my role.
+1. **IAM OIDC Identity Provider** — registered `token.actions.githubusercontent.com` in AWS IAM so AWS knows how to validate GitHub-signed tokens.
+2. **Trust Policy on the Role** — restricted to my specific repository and branch using the `sub` claim. Even if someone forks the repo, they cannot assume my role.
 3. **Workflow Permission** — added `permissions: id-token: write` to the GitHub Actions workflow so GitHub actually generates the OIDC token for the job.
 
 ---
 
 ## IAM Permissions for GitHub Actions
 
-The `GitHubActionsTerraformRole` uses a least-privilege inline policy with exactly three permission groups:
+The `GitHubActionsTerraformRole` uses a least-privilege inline policy (`GitHubActionsTerraformRolePolicy`) with exactly three permission groups:
 
-| Statement | What it allows | Why it's needed |
+| Statement | What it allows | Why it is needed |
 |---|---|---|
-| `TerraformStateAccess` | Read/write the S3 state file; read all bucket properties (`s3:GetBucket*`) | Terraform needs to read and update remote state, and to refresh the `aws_s3_bucket` resource attributes |
-| `TerraformEC2Read` | `ec2:Describe*` on all resources | Terraform refreshes VPC, subnet, EC2, security group, and route table state before planning |
+| `TerraformStateAccess` | Read/write the S3 state file; `s3:GetBucket*` scoped to the state bucket | Terraform reads and updates remote state, and refreshes the `aws_s3_bucket` resource attributes during plan |
+| `TerraformEC2Read` | `ec2:Describe*` on all resources | Terraform refreshes VPC, subnet, EC2, security group, and route table before planning. AWS does not allow resource-level restrictions on Describe calls |
 | `TerraformIAMRead` | `iam:GetRole`, `iam:GetRolePolicy`, `iam:GetInstanceProfile`, `iam:ListRolePolicies`, `iam:ListAttachedRolePolicies` | Terraform reads the managed IAM role and instance profile during refresh |
 
-The role can **read** existing infrastructure to detect drift, and can **read/write** the state file. It cannot create, modify, or destroy any AWS resource. `terraform apply` is always run manually.
+The role can **read** existing infrastructure to detect drift, and can **read/write** the state file. It cannot create, modify, or destroy any AWS resource. `terraform apply` is always run manually with a different set of credentials.
 
 ---
 
 ## Problems I Faced
 
-This section documents the real issues I ran into while building this project.
+This is the part where most of the actual learning happened.
 
 ### 1. OIDC Authentication Failure
 
-**Problem:** GitHub Actions kept failing at the "Configure AWS Credentials" step with an error saying it couldn't assume `GitHubActionsTerraformRole`.
+**Problem:** GitHub Actions kept failing at the "Configure AWS Credentials" step.
 
-**Why it happened:** The GitHub OIDC identity provider wasn't configured in AWS at all, so AWS had no way to validate the OIDC token GitHub was sending. The trust policy on the role also had an incorrect subject format.
+```
+Could not assume role with OIDC: the web identity token provided could not be validated.
+```
+
+**Why it happened:** The GitHub OIDC Identity Provider did not exist in AWS yet, so AWS had no way to validate the token. The role's trust policy also had an incorrect `sub` claim format.
 
 **What I did:**
-
 - Created the OIDC Identity Provider in AWS IAM for `token.actions.githubusercontent.com`
-- Updated the role trust policy to use the correct `sub` claim format tied to my specific repo and branch
+- Fixed the trust policy `sub` claim to match GitHub's format for my specific repo and branch
 
-**Result:** Authentication started working and the workflow could assume the role and get temporary credentials.
+**Result:** Authentication started working. The workflow could assume the role and get temporary credentials.
 
 ---
 
-### 2. Terraform Plan Kept Failing with AccessDenied
+### 2. IAM Trust Policy Rejection
 
-**Problem:** Once authentication worked, `terraform plan` started failing with `AccessDenied` errors from AWS. For example:
+**Problem:** GitHub was presenting a valid token, but got rejected:
+
+```
+Not authorized to perform sts:AssumeRoleWithWebIdentity
+```
+
+**Why it happened:** The trust policy conditions did not match the identity GitHub was presenting (repo name, branch).
+
+**Fix:** Corrected the trust policy to match the exact `sub` claim GitHub sends.
+
+**Result:** Role assumption worked. Credentials were issued. Then the next problem appeared.
+
+---
+
+### 3. Terraform Plan Failing with AccessDenied
+
+**Problem:** Once auth worked, `terraform plan` started failing with a sequence of `AccessDenied` errors:
 
 ```
 s3:GetBucketPolicy
+s3:GetBucketAcl
+s3:GetBucketCORS
+s3:GetBucketWebsite
 ec2:DescribeVpcAttribute
 iam:ListRolePolicies
 ```
 
-**Why it happened:** During `terraform plan`, Terraform refreshes its knowledge of every managed resource by making read API calls to AWS. Terraform's AWS provider (v6.67.0) is thorough about this — it reads many resource attributes including ones I hadn't explicitly configured, like bucket CORS settings, lifecycle policies, and EC2 instance attributes.
+**Why it happened:** During `terraform plan`, Terraform first *refreshes* every managed resource by making live AWS API calls — not just comparing `.tf` files to the state file. The AWS provider (v6.67.0) calls many read APIs including ones for bucket settings I never explicitly configured (CORS, website hosting, lifecycle, etc.).
 
-The tricky part: whenever Terraform hits an `AccessDenied` error, it stops completely. So each CI run only surfaces the *next* missing permission in the sequence. I couldn't see all the missing permissions at once — I had to fix them one by one, which meant a new CI run for each fix.
+The tricky part: Terraform stops completely on the first `AccessDenied`. So each CI run reveals only the *next* missing permission. I could not see them all at once.
 
-**First approach:** I added permissions one by one as each error appeared. It worked but was slow — 5+ CI runs just to discover all the missing read permissions.
+**First approach:** Fix one permission, push, fail on the next. Repeat. Slow and frustrating — 5+ CI runs just to discover all the missing permissions.
 
-**Better approach:** I redesigned the policy more systematically:
-
+**Better approach:** I stepped back and redesigned the policy systematically:
 - For S3: use `s3:GetBucket*` to cover all read-only bucket property lookups at once
-- For EC2: use `ec2:Describe*` since all EC2 Describe calls are read-only and AWS doesn't support resource-level restrictions on them anyway
+- For EC2: use `ec2:Describe*` — all Describe calls are read-only and AWS does not allow resource-level restrictions on them anyway
 - For IAM: keep only the specific `Get*` and `List*` calls Terraform actually needs
 
-This resolved all the refresh-phase errors in a single policy update without granting any write permissions.
+This resolved all refresh-phase errors in one policy update without granting any write permissions.
+
+**Result:** Before rerunning CI, I verified the live policy in AWS was valid and complete. The pipeline ran green.
 
 ---
 
-### 3. Terraform Module Refactoring
+### 4. Module Refactoring Without Destroying Infrastructure
 
-**Problem:** After moving resources into modules, running `terraform plan` produced a wall of `"has moved to module..."` messages and I wasn't sure if Terraform was going to recreate everything.
+**Problem:** After moving resources into modules, `terraform plan` showed a wall of `"has moved to module..."` messages. I was not sure if it was going to destroy everything.
 
-**Why it happened:** Terraform tracks resources by their address in the state file. For example, `aws_vpc.main` in the root module becomes `module.vpc.aws_vpc.main` after moving it into a child module. From Terraform's perspective, without explicit instruction, it looks like the original resource was deleted and a new one needs to be created — which would mean destroying my actual VPC and EC2 instance.
+**Why it happened:** Terraform tracks every resource by its address in the state file. `aws_vpc.main` and `module.vpc.aws_vpc.main` look like completely different resources to Terraform. Without guidance, it would delete the old one and create a new one — destroying the real VPC and EC2 instance.
 
-**What I did:** Added `moved {}` blocks in `main.tf` for every resource that changed address:
+**What I did:** Added `moved {}` blocks for every resource that changed address:
 
 ```hcl
 moved {
@@ -380,7 +463,7 @@ moved {
 }
 ```
 
-**Result:** `Plan: 0 to add, 0 to change, 0 to destroy.` — Terraform updated the state file addresses without making any changes to real AWS resources.
+**Result:** `Plan: 0 to add, 0 to change, 0 to destroy.` — Terraform updated the state addresses and left the real AWS infrastructure completely untouched.
 
 ---
 
@@ -392,71 +475,82 @@ moved {
 
 - [Terraform](https://www.terraform.io/downloads) >= 1.6.0
 - AWS CLI installed and configured (`aws configure`)
-- An S3 bucket for remote state (or update `providers.tf` to use local state for testing)
+- An S3 bucket for remote state (or update `providers.tf` to use a local backend for testing)
 
-### Clone the Repository
+### Steps
 
 ```bash
+# Clone the repo
 git clone https://github.com/ADDYY27/terraform-aws-infrastructure.git
 cd terraform-aws-infrastructure
-```
 
-### Initialize Terraform
-
-```bash
+# Initialize Terraform (downloads provider, connects to S3 backend)
 terraform init
-```
 
-This downloads the AWS provider and connects to the S3 remote backend.
-
-### Check Formatting
-
-```bash
+# Check formatting
 terraform fmt -check -recursive
-```
 
-### Validate Configuration
-
-```bash
+# Validate syntax
 terraform validate
-```
 
-### Preview the Plan
-
-```bash
+# Preview what would change
 terraform plan
-```
 
-Shows what Terraform would create, change, or destroy — nothing in AWS is modified at this step.
-
-### Apply
-
-```bash
+# Apply (manual only — CI never runs apply)
 terraform apply
-```
 
-> The GitHub Actions CI only runs `terraform plan`. Applying changes is always done manually.
-
-### Destroy
-
-```bash
+# Destroy when done
 terraform destroy
 ```
 
-> Use with caution — this will permanently delete all managed AWS resources.
+The only root variable is `instance_type` (default `t3.micro`). Override it if needed:
+
+```bash
+terraform apply -var="instance_type=t3.small"
+```
+
+> The GitHub Actions CI only runs `terraform plan`. Applying and destroying are always done manually.
 
 ---
 
 ## What I Learned
 
-A few things that stuck with me after building this:
+**Terraform state is everything.** If the state file is lost or corrupted, Terraform loses track of what it owns. Using S3 as a remote backend with versioning and encryption is not optional in any real project — it is the baseline.
 
-**Terraform state is everything.** If the state file is lost or corrupted, Terraform loses track of what it owns in AWS. Using S3 as a remote backend with versioning and encryption isn't optional in any real project — it's the baseline you should always start with.
+**`moved` blocks are the right tool for refactoring.** Restructuring code into modules feels risky because changing a resource's address looks like a deletion. Once I understood what `moved` blocks actually do, refactoring became a lot less stressful.
 
-**`moved` blocks are the right tool for refactoring.** Restructuring Terraform code into modules feels risky at first because changing a resource's address looks like a deletion to Terraform. Once I understood what `moved` blocks actually do, refactoring became a lot less stressful.
+**OIDC is the right way to authenticate CI to AWS.** Static access keys stored in GitHub Secrets are valid indefinitely until manually rotated. OIDC tokens expire within an hour. There is nothing to clean up if something goes wrong.
 
-**OIDC is the right way to authenticate CI to AWS.** Static access keys stored in GitHub Secrets are a liability — they're valid indefinitely until you manually rotate them. OIDC tokens expire within an hour and there's nothing to clean up if something goes wrong.
+**Terraform's AWS provider reads far more than you expect during refresh.** The provider checks every attribute of every managed resource — including CORS settings, website hosting config, lifecycle policies, and instance attributes — before calculating a plan. When building the IAM policy for a CI role, granting `ec2:Describe*` and `s3:GetBucket*` upfront is the right call. Guessing which specific API calls the provider makes is a slow, painful process.
 
-**Terraform's AWS provider reads a lot more than you'd expect during refresh.** The provider checks every attribute of every managed resource before calculating a plan. When building the IAM policy for a CI plan role, granting `ec2:Describe*` and `s3:GetBucket*` upfront is the right call — trying to guess which specific Describe calls the provider makes for each resource version is a slow, painful process.
+**Least privilege is about understanding what is needed, not minimizing everything blindly.** The goal is to grant exactly what the tool needs and nothing more. Getting there requires understanding what the tool actually does under the hood.
 
-**Least privilege is about understanding what's needed, not about minimizing everything.** The goal isn't to grant the fewest permissions possible — it's to grant exactly what's needed and nothing more. Getting there requires actually understanding what the tool does under the hood.
+**Terraform stops on the first error.** This sounds obvious, but it has a real consequence for IAM work: you can never see all the missing permissions in one run. The systematic `Describe*` / `GetBucket*` approach exists precisely because of this limitation.
+
+---
+
+## Cleanup
+
+These are real AWS resources that cost money:
+
+- **Stop the EC2 instance** when not working on the project. A stopped instance does not bill for compute, but the EBS volume still does.
+- **Check for stragglers** — this project does not create NAT Gateways, Elastic IPs, or Load Balancers, but it is a good habit to verify.
+
+When completely done:
+
+```bash
+terraform destroy
+```
+
+Review the destroy plan carefully before confirming. Do **not** destroy the S3 state bucket while it is still configured as Terraform's backend.
+
+---
+
+## Future Improvements
+
+- Restrict SSH access to a specific IP/CIDR instead of `0.0.0.0/0`
+- Add a private subnet and learn how NAT Gateways work
+- Add `terraform apply` to the CI pipeline (gated behind a manual approval step)
+- Parameterize CIDR blocks, region, and availability zone instead of hardcoding them
+- Add automated cost estimation (e.g., [Infracost](https://www.infracost.io/)) to the CI pipeline
+- Tighten the GitHub Actions IAM policy even further toward least privilege
